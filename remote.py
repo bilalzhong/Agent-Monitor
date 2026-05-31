@@ -26,9 +26,13 @@ def load_config():
 
 
 def save_config(cfg):
-    """Save remote server config."""
+    """Save remote server config.  Restricts permissions to owner-only."""
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(CONFIG_PATH, 0o600)  # owner read/write only
+    except Exception:
+        pass
 
 
 # ── Embedded monitor.py (inlined to avoid SFTP upload) ──────────────────────
@@ -201,7 +205,29 @@ class RemoteMonitor:
             return
 
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Load system known_hosts for host-key verification.
+        # Changed keys → paramiko rejects (MITM protection).
+        # New hosts   → _AutoSavePolicy adds to known_hosts for future verification.
+        try:
+            client.load_system_host_keys()
+        except Exception:
+            pass
+
+        known_hosts_file = os.path.expanduser("~/.ssh/known_hosts")
+
+        class _AutoSavePolicy(paramiko.MissingHostKeyPolicy):
+            def missing_host_key(self, hostname, key):
+                # First connection to this host — save key for future MITM protection
+                try:
+                    os.makedirs(os.path.dirname(known_hosts_file), exist_ok=True)
+                    with open(known_hosts_file, "a") as f:
+                        f.write(f"{hostname} {key.get_name()} {key.get_base64()}\n")
+                except Exception:
+                    pass
+
+        client.set_missing_host_key_policy(_AutoSavePolicy())
+
         client.connect(
             hostname=self._host,
             port=self._port,
