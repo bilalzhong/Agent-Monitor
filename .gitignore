@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+dist/
+*.spec
+*.exe
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python
+*.egg-info/
+.eggs/
+venv/
+.venv/
+
+# Temp
+test_*.png
+*.tmp
