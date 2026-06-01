@@ -25,5 +25,5 @@ venv/
 .venv/
 
 # Temp
-test_*.png
+test_*
 *.tmp

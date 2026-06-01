@@ -12,6 +12,7 @@ import os
 import sys
 import platform
 import math
+import ctypes
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from monitor import get_full_status, format_tokens
@@ -23,6 +24,53 @@ IS_WIN = platform.system() == "Windows"
 FONT_SANS = "SF Pro Display" if IS_MAC else "Segoe UI"
 FONT_MONO = "SF Mono" if IS_MAC else "Cascadia Code"
 
+
+# ── Single-instance lock ───────────────────────────────────────────────────
+_SINGLE_INSTANCE_MUTEX = None
+
+def _acquire_single_instance():
+    """Acquire a system-wide mutex.  Returns True if this is the first instance."""
+    global _SINGLE_INSTANCE_MUTEX
+    if not IS_WIN:
+        # Unix: use a file lock in the temp directory
+        import tempfile
+        import fcntl
+        lock_path = os.path.join(tempfile.gettempdir(), "agent-monitor.lock")
+        try:
+            _SINGLE_INSTANCE_MUTEX = open(lock_path, "w")
+            fcntl.flock(_SINGLE_INSTANCE_MUTEX, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _SINGLE_INSTANCE_MUTEX.write(str(os.getpid()))
+            _SINGLE_INSTANCE_MUTEX.flush()
+            return True
+        except (IOError, OSError):
+            return False
+    # Windows: use a named mutex
+    kernel32 = ctypes.windll.kernel32
+    mutex_name = r"Global\Agent-Monitor-SingleInstance"
+    _SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(None, ctypes.c_bool(True), mutex_name)
+    if not _SINGLE_INSTANCE_MUTEX:
+        return True  # fallback — let it run
+    error = kernel32.GetLastError()
+    if error == 183:  # ERROR_ALREADY_EXISTS
+        return False
+    return True
+
+
+def _bring_existing_to_front():
+    """Try to find and activate the already-running Agent Monitor window."""
+    if not IS_WIN:
+        return
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW(None, "Agent Monitor")
+        if hwnd:
+            # Show window if minimized
+            SW_RESTORE = 9
+            ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+            # Bring to foreground
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
 # ── Design system ──────────────────────────────────────────────────────────
 BG          = "#0d0d14"
 TEXT        = "#e4e4ef"
@@ -33,6 +81,7 @@ YELLOW_ON   = "#ffee00"
 YELLOW_OFF  = "#221800"
 RED_ON      = "#ff0022"
 RED_OFF     = "#220008"
+SURFACE     = "#1a1a2e"
 ACCENT      = "#2a2a3a"
 
 LIGHT_R     = 18
@@ -615,6 +664,17 @@ class App:
 
 
 def main():
+    # ── Single-instance guard ─────────────────────────────────────────
+    if not _acquire_single_instance():
+        _bring_existing_to_front()
+        if IS_WIN:
+            ctypes.windll.user32.MessageBoxW(
+                0, "Agent Monitor is already running.\n\nCheck the system tray or taskbar.",
+                "Agent Monitor", 0x00040000 | 0x00000040)  # MB_ICONINFORMATION | MB_OK
+        else:
+            print("Agent Monitor is already running.", file=sys.stderr)
+        sys.exit(0)
+
     App().run()
 
 
