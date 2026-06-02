@@ -46,7 +46,7 @@ HOME = os.path.expanduser("~")
 CLAUDE_DIR = os.path.join(HOME, ".claude")
 PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 SESSIONS_DIR = os.path.join(CLAUDE_DIR, "sessions")
-TOOL_STALL = 1.5
+TOOL_STALL = 0.8
 
 def _find_session_file():
     if not os.path.isdir(SESSIONS_DIR): return None
@@ -124,7 +124,10 @@ def _last_stop_reason(events):
 def _is_auto_approve(events):
     for event in reversed(events):
         if event.get("type") == "permission-mode":
-            return event.get("permissionMode") == "acceptEdits"
+            mode = event.get("permissionMode", "")
+            if mode == "bypassPermissions":
+                return True
+            return False
     return False
 
 def detect_state(events, transcript_age, session_data, session_age):
@@ -136,9 +139,13 @@ def detect_state(events, transcript_age, session_data, session_age):
         return {"state": "red", "status_text": "Idle"}
     if not session_busy and stop != "tool_use":
         return {"state": "red", "status_text": "Idle"}
-    if session_busy and pending and transcript_age > TOOL_STALL and not auto_approve:
-        hint = tool_names[0] if tool_names else "?"
-        return {"state": "yellow", "status_text": "Approval: " + hint}
+    stalled = transcript_age > TOOL_STALL
+    if stalled and not auto_approve:
+        if pending:
+            hint = tool_names[0] if tool_names else "?"
+            return {"state": "yellow", "status_text": "Approval: " + hint}
+        if stop == "tool_use":
+            return {"state": "yellow", "status_text": "Approval needed"}
     return {"state": "green", "status_text": "Running..."}
 
 def calculate_tokens(events):

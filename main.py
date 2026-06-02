@@ -76,13 +76,14 @@ BG          = "#0d0d14"
 TEXT        = "#e4e4ef"
 TEXT_DIM    = "#6b6b80"
 GREEN_ON    = "#00ff33"
-GREEN_OFF   = "#002206"
+GREEN_OFF   = "#00550e"
 YELLOW_ON   = "#ffee00"
-YELLOW_OFF  = "#221800"
+YELLOW_OFF  = "#554400"
 RED_ON      = "#ff0022"
-RED_OFF     = "#220008"
+RED_OFF     = "#550011"
 SURFACE     = "#1a1a2e"
 ACCENT      = "#2a2a3a"
+TRANS_KEY   = "#010101"   # color-key for borderless transparent background
 
 LIGHT_R     = 18
 RING_W      = 6
@@ -104,6 +105,12 @@ REMOTE_POLL = 3          # seconds — lighter on the server
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _make_ringed(fill_hex, r=LIGHT_R, gap=GAP, rw=RING_W, pad=PADDING):
+    """Generate a single ringed indicator image with anti-aliased edges.
+
+    The gap between the outer ring and the inner fill is filled with
+    opaque black so that the ring border and the light body are cleanly
+    separated regardless of desktop background.
+    """
     from PIL import Image
     size = int((r + gap + rw + pad) * 2)
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -115,6 +122,7 @@ def _make_ringed(fill_hex, r=LIGHT_R, gap=GAP, rw=RING_W, pad=PADDING):
         for x in range(size):
             dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
             if ri - 0.5 <= dist <= ro + 0.5:
+                # ── outer metallic ring ──────────────────────────────
                 if dist < ri:
                     a = int(255 * max(0, (dist - (ri - 1.2)) / 1.2))
                 elif dist > ro:
@@ -131,6 +139,7 @@ def _make_ringed(fill_hex, r=LIGHT_R, gap=GAP, rw=RING_W, pad=PADDING):
                     img.putpixel((x, y), (v, v, v, a))
                 continue
             if r <= dist < ri:
+                # ── gap between ring border and light body — black ────
                 if dist < r + 0.5:
                     a = int(255 * max(0, (dist - r) / 0.5))
                 elif dist < ri - 0.5:
@@ -139,9 +148,10 @@ def _make_ringed(fill_hex, r=LIGHT_R, gap=GAP, rw=RING_W, pad=PADDING):
                     a = int(255 * max(0, 1 - (dist - (ri - 0.5)) / 0.5))
                 a = max(0, min(255, a))
                 if a > 0:
-                    img.putpixel((x, y), (6, 6, 10, a))
+                    img.putpixel((x, y), (0, 0, 0, a))
                 continue
             if dist < r:
+                # ── inner light body — coloured fill ─────────────────
                 if dist < r - 1.5:
                     a = 255
                 elif dist < r:
@@ -173,17 +183,26 @@ class Dot(tk.Canvas):
             bg=BG, highlightthickness=0, **kw,
         )
         self._lit = False
+        self._on_color = on_color
+        self._off_color = off_color
         from PIL import ImageTk
         self._img_on  = ImageTk.PhotoImage(_make_ringed(on_color))
         self._img_off = ImageTk.PhotoImage(_make_ringed(off_color))
         cx = CELL_W // 2
         self._img_id = self.create_image(cx, CELL_W // 2, image=self._img_off)
-        self.create_text(cx, CELL_W + 11, text=label, fill=TEXT_DIM,
-                         font=(FONT_SANS, 9))
+        self._label_id = self.create_text(
+            cx, CELL_W + 11, text=label, fill=TEXT_DIM,
+            font=(FONT_SANS, 9))
     def set_on(self, on: bool):
         if on == self._lit: return
         self._lit = on
         self.itemconfig(self._img_id, image=self._img_on if on else self._img_off)
+    def hide_label(self):
+        self.itemconfig(self._label_id, state="hidden")
+        self.config(height=CELL_W)
+    def show_label(self):
+        self.itemconfig(self._label_id, state="normal")
+        self.config(height=CELL_H)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -214,7 +233,7 @@ def _dialog_remote(parent):
         tk.Label(dlg, text=label, fg=TEXT_DIM, bg=BG,
                  font=(FONT_SANS, 9), anchor="e",
         ).grid(row=idx, column=0, sticky="e", padx=(14, 6), pady=(10 if idx == 0 else 4))
-        show = "" if key == "password" else None
+        show = "*" if key == "password" else None
         e = tk.Entry(dlg, font=(FONT_SANS, 10),
                      fg=TEXT, bg="#1a1a2e", insertbackground=TEXT,
                      relief="flat", borderwidth=0,
@@ -339,6 +358,15 @@ class App:
         self._var_hover_expand = tk.BooleanVar(value=False)
         self._var_topmost      = tk.BooleanVar(value=True)
         self._var_remote       = tk.BooleanVar(value=False)
+        self._var_hide_titlebar = tk.BooleanVar(value=False)
+
+        # Drag state for borderless window
+        self._drag_x = 0
+        self._drag_y = 0
+
+        # Blink state for yellow approval indicator (3 Hz)
+        self._blink_job   = None
+        self._blink_phase = 0
 
         self._build()
         self._init_tray()
@@ -484,6 +512,10 @@ class App:
             label="Always on Top", variable=self._var_topmost,
             command=self._toggle_pin)
         self._ctx.add_separator()
+        self._ctx.add_checkbutton(
+            label="Hide Title Bar", variable=self._var_hide_titlebar,
+            command=self._toggle_titlebar)
+        self._ctx.add_separator()
         self._ctx.add_command(label="Exit", command=self._quit)
 
         self.root.bind("<Button-3>", self._on_right_click)
@@ -550,6 +582,71 @@ class App:
         self.root.attributes("-topmost", not cur)
         self._var_topmost.set(not cur)
         self._pin.config(fg="#00f277" if not cur else TEXT_DIM)
+
+    def _toggle_titlebar(self):
+        """Show or hide the OS window title bar (borderless overlay mode)."""
+        hide = self._var_hide_titlebar.get()
+        if hide:
+            self._enter_minimal()
+        else:
+            self._exit_minimal()
+
+    def _enter_minimal(self):
+        """Borderless transparent mode — only the three indicator lights visible."""
+        self.root.overrideredirect(True)
+        self.root.wm_attributes("-transparentcolor", TRANS_KEY)
+
+        # Root → colour-keyed transparent; light strip → black
+        self.root.configure(bg=TRANS_KEY)
+        self._lights.configure(bg="#000000")
+        for dot in (self._green, self._yellow, self._red):
+            dot.configure(bg="#000000")
+            dot.hide_label()
+
+        self._extra_top.pack_forget()
+        self._extra_bot.pack_forget()
+        self._lights.pack(pady=(0, 0))
+
+        min_w = COMPACT_W
+        min_h = CELL_W
+        self.root.geometry(f"{min_w}x{min_h}")
+        self._bind_drag()
+
+    def _exit_minimal(self):
+        """Restore normal windowed mode from borderless transparent mode."""
+        self.root.wm_attributes("-transparentcolor", "")
+        self.root.configure(bg=BG)
+        self._lights.configure(bg=BG)
+        for dot in (self._green, self._yellow, self._red):
+            dot.configure(bg=BG)
+            dot.show_label()
+
+        self.root.overrideredirect(False)
+        self._unbind_drag()
+        self._apply_compact(self._compact)
+
+    def _bind_drag(self):
+        """Bind mouse-drag events so the borderless window stays movable."""
+        for w in (self.root, self._lights,
+                  self._green, self._yellow, self._red):
+            w.bind("<Button-1>", self._start_drag, add="+")
+            w.bind("<B1-Motion>", self._do_drag, add="+")
+
+    def _unbind_drag(self):
+        """Remove drag bindings when title bar is restored."""
+        for w in (self.root, self._lights,
+                  self._green, self._yellow, self._red):
+            w.unbind("<Button-1>")
+            w.unbind("<B1-Motion>")
+
+    def _start_drag(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def _do_drag(self, event):
+        dx = event.x - self._drag_x
+        dy = event.y - self._drag_y
+        self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
 
     def _toggle_compact(self):
         self._compact = self._var_compact.get()
@@ -627,10 +724,20 @@ class App:
 
     def _apply(self, s):
         state = s.get("state", "red")
+        prev_state = self._current
         self._current = state
+
+        # Green / Red — solid on when active
         self._green.set_on(state == "green")
-        self._yellow.set_on(state == "yellow")
         self._red.set_on(state == "red")
+
+        # Yellow — 3 Hz blink during approval wait
+        if state == "yellow":
+            if prev_state != "yellow":
+                self._start_blink()
+        else:
+            self._stop_blink()
+
         self._status.config(text=s.get("status_text", ""))
         self._tok_session.config(
             text=format_tokens(s.get("session_total", 0)))
@@ -639,6 +746,31 @@ class App:
         sid = s.get("session_id", "—")
         self._sid.config(text=f"session {sid[:8]}…")
         self._update_tray(state)
+
+    # ── Yellow blink (3 Hz) ────────────────────────────────────────────
+
+    def _start_blink(self):
+        """Begin 3 Hz blink on the yellow indicator."""
+        if self._blink_job is not None:
+            return
+        self._blink_phase = 0
+        self._do_blink()
+
+    def _do_blink(self):
+        if self._current != "yellow":
+            self._blink_job = None
+            return
+        # 3 Hz → period 333 ms, half-period 167 ms
+        self._blink_phase = 1 - self._blink_phase
+        self._yellow.set_on(bool(self._blink_phase))
+        self._blink_job = self.root.after(167, self._do_blink)
+
+    def _stop_blink(self):
+        if self._blink_job is not None:
+            self.root.after_cancel(self._blink_job)
+            self._blink_job = None
+        self._blink_phase = 0
+        self._yellow.set_on(False)
 
     def _poll(self):
         interval = 1

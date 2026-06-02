@@ -18,7 +18,7 @@ PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
 SESSIONS_DIR = os.path.join(CLAUDE_DIR, "sessions")
 
 # Minimal time thresholds (seconds)
-TOOL_STALL = 1.5  # transcript not updated for this long while session busy → approval wait
+TOOL_STALL = 0.8  # transcript not updated for this long → likely approval wait
 
 
 def _find_session_file():
@@ -136,13 +136,19 @@ def _last_stop_reason(events):
 
 def _is_auto_approve(events):
     """
-    Check whether the current permission mode auto-approves tool use.
-    When permissionMode is 'acceptEdits', tools run without asking the user.
+    Check whether the current permission mode auto-approves ALL tool use.
+    Even 'acceptEdits' still prompts yes/no for dangerous tools (bash, write…),
+    so we treat it as NOT auto-approve.  Only truly bypassing modes (like
+    'bypassPermissions') skip approval entirely.
     """
     for event in reversed(events):
         if event.get("type") == "permission-mode":
-            return event.get("permissionMode") == "acceptEdits"
-    return False  # conservative: assume approval may be needed
+            mode = event.get("permissionMode", "")
+            if mode == "bypassPermissions":
+                return True
+            # acceptEdits / default / anything else — approval may be needed
+            return False
+    return False  # no permission-mode event — assume approval may be needed
 
 
 def detect_state(events, transcript_age, session_data, session_age):
@@ -171,11 +177,17 @@ def detect_state(events, transcript_age, session_data, session_age):
     if not session_busy and stop != "tool_use":
         return {"state": "red", "status_text": "Idle"}
 
-    # ── YELLOW: session busy + tool pending + stalled transcript ───────
-    #           + NOT in auto-approve mode
-    if session_busy and pending and transcript_age > TOOL_STALL and not auto_approve:
-        hint = tool_names[0] if tool_names else "?"
-        return {"state": "yellow", "status_text": f"Approval: {hint}"}
+    # ── YELLOW: tool pending + stalled transcript + NOT auto-approve ─
+    # Two independent signals — either is sufficient:
+    #   1. _has_pending_tool_use  — unresolved tool_use in transcript events
+    #   2. stop == "tool_use"     — stop_reason is an even more reliable indicator
+    stalled = transcript_age > TOOL_STALL
+    if stalled and not auto_approve:
+        if pending:
+            hint = tool_names[0] if tool_names else "?"
+            return {"state": "yellow", "status_text": f"Approval: {hint}"}
+        if stop == "tool_use":
+            return {"state": "yellow", "status_text": "Approval needed"}
 
     # ── GREEN: everything else (actively working) ──────────────────────
     return {"state": "green", "status_text": "Running…"}
